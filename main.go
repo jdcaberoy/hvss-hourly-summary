@@ -50,6 +50,7 @@ func main() {
 	var trendcsv []csvDatas
 
 	// get trend from all csvs and compile to trendcsv variable
+	// TODO: compile per trend and per object complete name
 	for _, v := range trendList {
 		var t csvDatas
 		t = r.compilePerTrend(v)
