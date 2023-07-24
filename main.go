@@ -3,74 +3,159 @@ package main
 import (
 	"encoding/csv"
 	"fmt"
-	"os"
-	"strings"
 	"io"
-	"time"
+	"os"
 	"strconv"
+	"strings"
+	"time"
+
+	"github.com/360EntSecGroup-Skylar/excelize"
 )
 
 type hourlyCfg struct {
-	date time.Time
-	title string
+	date   time.Time
+	title  string
 	values []float64
 }
 
 type hourlyCfgs []hourlyCfg
 
-func main(){
+func main() {
 
+	filesnames := []string{
+		"TR1.CSV",
+		"TR2.CSV",
+		"Daily Operation Performance Monitoring.CSV",
+	}
 	// open TR1.CSV and TR2.CSV
-	tr1, tr2 := openFiles()
-	// open another copy for oil2 and wind2
-	tr1c, tr2c := openFiles()
+	f := openFiles(filesnames)
 
-	// user inputs month, date, and year
+	if len(f) == 0 {
+		fmt.Printf("The following files names in {name.CSV} format are accepted: %v. contact JDC for requests.\n", filesnames)
+		for {
+			fmt.Println("Press CTRL+C to exit...")
+			fmt.Scanln()
+		}
+	}
+
 	date := inputDateValues()
-	var err error
 
-	tf1cfgs := generateTF1Cfgs(date)
-	tf2cfgs := generateTF2Cfgs(date)
+	r := convertToReadables(f)
+	// fmt.Printf("DEBUGGER: flag1\n")
+	trendList := r.getTrends()
+	// fmt.Printf("DEBUGGER: flag2\n")
+	// fmt.Printf("DEBUGGER: trend list: %v\n\n", trendList)
 
-	tf1cfgs[0].values, err = interpretHourly(tr1, tf1cfgs[0])
-	if err!= nil{
-		fmt.Printf("error interpreting oil1 values")
-	}
-	tf1cfgs[1].values, err = interpretHourly(tr1c, tf1cfgs[1])
-	if err!= nil{
-		fmt.Printf("error interpreting wind1 values")
+	//csv data sorted by trend
+	var trendcsv []csvDatas
+
+	// get trend from all csvs and compile to trendcsv variable
+	for _, v := range trendList {
+		var t csvDatas
+		t = r.compilePerTrend(v)
+		trendcsv = append(trendcsv, t)
 	}
 
-	tf2cfgs[0].values, err = interpretHourly(tr2, tf2cfgs[0])
-	if err!= nil{
-		fmt.Printf("error interpreting oil2 values")
-	}
-	tf2cfgs[1].values, err = interpretHourly(tr2c, tf2cfgs[1])
-	if err!= nil{
-		fmt.Printf("error interpreting wind2 values")
-	}
-	cfgs := append(tf1cfgs, tf2cfgs...)
+	// fmt.Printf("DEBUGGER: flag3\n")
 
-	for _, v := range cfgs{
-		printValues(v)
-	}
-}
+	// interpret data hourly per trend extracted from csv
+	e := excelize.NewFile()
 
-func openFiles()(*os.File, *os.File){
-	tr1, err := os.Open("TR1.CSV")
+	for _, v := range trendList {
+		e.NewSheet(v)
+	}
+
+	for _, v := range trendcsv {
+		activeTrend := v[0].trend
+		offset := 2
+		fmt.Printf("Trend: %v\n", activeTrend)
+		if strings.Contains(activeTrend, "Wh") || strings.Contains(activeTrend, "Rh") {
+			lastReading := v[len(v)-1].value
+			lastReadingTime := v[len(v)-1].date
+			firstReading := v[offset].value
+			firstReadingTime := v[offset].date
+			total := lastReading - firstReading
+			var h hValues
+			p := excelParams{
+				name:      activeTrend,
+				hasTotal:  true,
+				onlyTotal: true,
+				totalHParams: totalHParams{
+					firstReading:     firstReading,
+					lastReading:      lastReading,
+					firstReadingTime: firstReadingTime,
+					lastReadingTime:  lastReadingTime,
+					total:            total,
+				},
+			}
+
+			if activeTrend == "ENERGY MWh EXPORT" {
+				fmt.Printf("NOTE: DUE TO STUPID SCADA IMPLEMENTATION, READINGS BEFORE 6AM ARE NOT RECORDED. PLEASE MANUALLY REFER VALUES ON WRITTEN FORMS\n")
+				offset--
+				h = v.interpretHourly(date)
+				h.calculateDValues()
+				h.printValues(true)
+				p.onlyTotal = false
+			}
+			h.encodeExcel(e, p)
+
+			fmt.Printf("@hour 0 time = %v	read value = %v\n", firstReadingTime, firstReading)
+			fmt.Printf("@hour 24 time = %v	read value = %v\n", lastReadingTime, lastReading)
+			fmt.Printf("TOTAL: %.2f\n", total)
+
+			fmt.Printf("\n")
+		} else {
+			h := v.interpretHourly(date)
+			h.calculateDValues()
+			h.printValues(false)
+			h.encodeExcel(e, excelParams{
+				name:     activeTrend,
+				hasTotal: false,
+			})
+			fmt.Printf("\n")
+		}
+	}
+
+	fileTitle := fmt.Sprintf("Daily Operations  %v-%v-%v.xlsx", date.Year(), int(date.Month()), date.Day())
+	err := e.SaveAs(fileTitle)
 	if err != nil {
-		fmt.Printf("error in opening TR 1 file : %v", err)
-		panic(err)
+		for {
+			fmt.Printf("err: %v\n", err)
+			fmt.Println("error creating excel. Press CTRL+C to exit...")
+			fmt.Scanln()
+		}
 	}
-	tr2, err := os.Open("TR2.CSV")
-	if err != nil{
-		fmt.Printf("error in opening TR 2 file: %v", err)
-		panic(err)
+
+	fmt.Println("Excel file created successfully.")
+	for {
+		fmt.Println("Press CTRL+C to exit...")
+		fmt.Scanln()
 	}
-	return tr1, tr2
 }
 
-func inputDateValues()time.Time{
+func openFiles(n []string) []os.File {
+	var files []os.File
+
+	for _, v := range n {
+		f, err := os.Open(v)
+		if err != nil {
+			if os.IsNotExist(err) {
+				fmt.Printf("error: file name %v does not exist\n", v)
+			} else {
+				fmt.Printf("error opening file: %v\n", err)
+				panic(err)
+			}
+		}
+		if f != nil {
+			files = append(files, *f)
+			fmt.Printf("%v successfully opened.\n", v)
+		}
+	}
+
+	return files
+}
+
+func inputDateValues() time.Time {
 	var inputmonth, inputday, inputyear int
 	today := time.Now()
 	fmt.Println("input month:")
@@ -88,55 +173,70 @@ func inputDateValues()time.Time{
 	if inputyear == 0 {
 		today.Year()
 	}
-	return time.Date(inputyear,time.Month(inputmonth),inputday,0,0,0,0,time.Local)
+	fmt.Println()
+
+	return time.Date(inputyear, time.Month(inputmonth), inputday, 0, 0, 0, 0, time.UTC)
 }
 
-func generateTF1Cfgs(date time.Time)hourlyCfgs{
-	oil1 := hourlyCfg{
-		date: date,
-		title: "NO.1 OIL TEMPERATURE",
-	}
-	wind1 := hourlyCfg{
-		date: date,
-		title: "NO.1 WINDING TEMPERATURE",
-	}
-	return hourlyCfgs{oil1, wind1}
+type csvData struct {
+	trend string
+	date  time.Time
+	value float64
 }
 
-func generateTF2Cfgs(date time.Time)hourlyCfgs{
-	oil2 := hourlyCfg{
-		date: date,
-		title: "NO.2 OIL TEMPERATURE",
+type csvDatas []csvData
+
+func (c *csvDatas) getTrends() []string {
+	var trendList []string
+	for _, v := range *c {
+		if !isElementExist(trendList, v.trend) {
+			trendList = append(trendList, v.trend)
+		}
 	}
-	wind2 := hourlyCfg{
-		date: date,
-		title: "NO.2 WINDING TEMPERATURE",
-	}
-	return hourlyCfgs{oil2, wind2}
+	return trendList
 }
 
-func interpretHourly (f *os.File, cfg hourlyCfg)([]float64, error){
+func isElementExist(s []string, str string) bool {
+	for _, v := range s {
+		if v == str {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *csvDatas) compilePerTrend(name string) csvDatas {
+	var compiledTrend csvDatas
+	for k, v := range *c {
+		if v.trend == name {
+			compiledTrend = append(compiledTrend, (*c)[k])
+		}
+	}
+	return compiledTrend
+}
+
+func convertToReadables(f []os.File) csvDatas {
+	var c csvDatas
+	for _, v := range f {
+		compileCsv(&v, &c)
+	}
+	return c
+}
+
+func compileCsv(f *os.File, c *csvDatas) csvDatas {
 	var err error
 	reader := csv.NewReader(f)
 	reader.Comma = ','
 	reader.Comment = '#'
 	reader.TrimLeadingSpace = true
 
-	var hourlyValues []float64
-	timeValue := make(map[time.Time]float64)
-
 	// Read the headers of csv
 	if _, err = reader.Read(); err != nil {
-		fmt.Printf("err check1err: %v, title: %v", err, cfg.title)
-		return hourlyValues, err
+		fmt.Printf("error reading csv header: %v", err)
 	}
-	// Read all if implementation is easier in the future
-	// Using reader.ReadAll() will get error on 2nd run for the next titles to be searched
-	// rows, err := reader.ReadAll()
-	// if err != nil {
-	// 	fmt.Printf("error reading all rows: %v", err)
-	// }
-	// fmt.Printf("rows[0]: %v", rows[0][1])
+
+	var d csvDatas
+
 	for {
 		row, err := reader.Read()
 		if err == io.EOF {
@@ -144,68 +244,186 @@ func interpretHourly (f *os.File, cfg hourlyCfg)([]float64, error){
 		} else if err != nil {
 			fmt.Printf("err in reading csv row: %v", err)
 		}
-		csvTitle := row[1]
-		if csvTitle != cfg.title {
-			continue
-		}
-		dateString := row[2]
-		csvDate, err := time.Parse("02/01/2006 15:04:05", dateString)
+		var l csvData
+		l.trend = row[1]
+		l.date, err = time.Parse("02/01/2006 15:04:05", row[2])
 		if err != nil {
-			fmt.Printf("error parsing csv time: %v", err)
-			return []float64{}, err
+			fmt.Printf("error parsing date: %v", err)
+			panic(err)
 		}
-		csvValues, err := strconv.ParseFloat(strings.TrimSpace(row[6]), 64)
+		l.value, err = strconv.ParseFloat(strings.TrimSpace(row[6]), 64)
 		if err != nil {
-			fmt.Printf("error parsing csv float values: %v", err)
-			return []float64{}, err
+			fmt.Printf("error parsing float: %v", err)
+			panic(err)
 		}
-		// save date/time 
-		timeValue[csvDate] = csvValues
+		d = append(d, l)
 	}
-	// fmt.Printf("rows of rows check: %v", len(rows))
-	// for i:=0;i<len(rows);i++{
-	// 	for _, v := range rows[i]{
-	// 		fmt.Printf("v: %v\nlenght of rows: %v\n",v, len(v))
-	// 		break
-	// 		// if csvTitle != cfg.title {
-	// 		// 	continue
-	// 		// }
-	// 		// dateString := row[2]
-	// 		// csvDate, err := time.Parse("02/01/2006 15:04:05", dateString)
-	// 		// if err != nil {
-	// 		// 	fmt.Printf("error parsing time: %v", err)
-	// 		// }
-	// 		// csvValues, err := strconv.ParseFloat(strings.TrimSpace(row[6]), 64)
-	// 		// if err != nil {
-	// 		// 	fmt.Printf("error parsing values: %v", err)
-	// 		// }
-	// 		// // fmt.Printf("map sample: %v", timeValue)
-	// 		// timeValue[csvDate] = csvValues
-	// 	}
-	// 	break
-	// }
-	// targetTime := cfg.date.Add((time.Hour * time.Duration(i)) + (time.Minute * 50))
-	
-	// get values hourly in a 24 hour period
-	for i:=0; i<24; i++ {
-		targetTime := cfg.date.Add((time.Hour * time.Duration(i)) + (time.Minute * 50))
-		for k, v := range timeValue {
+
+	// fmt.Printf("DEBUGGER: len d: %v\n", len(d))
+
+	*c = append(*c, d...)
+
+	// fmt.Printf("DEBUGGER: csv datas lenght: %v\n", len(d))
+	return d
+}
+
+// func interpretHourly(c csvDatas, date time.Time) map[time.Time]float64 {
+// 	hourlyValues := make(map[time.Time]float64)
+// 	for i := 0; i < 24; i++ {
+// 		targetTime := date.Add((time.Hour * time.Duration(i)) + (time.Minute * 50))
+// 		for _, v := range c {
+// 			// if value is between allotted time of H:50 to H:60, save in array and break loop
+// 			if v.date.After(targetTime) && v.date.Before(targetTime.Add(time.Minute*10)) {
+// 				hourlyValues[targetTime] = v.value
+// 				// DEBUGGER
+// 				// fmt.Printf("target time: %v, hourly value: %v, timevalue: %v\n", targetTime, v, k)
+// 				break
+// 			}
+// 		}
+// 	}
+// 	return hourlyValues
+// }
+
+func (c *csvDatas) interpretHourly(date time.Time) hValues {
+	var hourlyValues hValues
+	// fmt.Printf("DEBUGGER: Name %v, lenght %v,sample value date: %v	|	%v\n", (*c)[0].trend, len(*c), (*c)[565].value, (*c)[565].date)
+	for i := 0; i < 24; i++ {
+		targetTime := date.Add((time.Hour * time.Duration(i)) + (time.Minute * 50))
+		// fmt.Printf("DEBUGGER: target time: %v\n", targetTime)
+		for k, v := range *c {
 			// if value is between allotted time of H:50 to H:60, save in array and break loop
-			if k.After(targetTime) && k.Before(targetTime.Add(time.Minute * 10)){
-				hourlyValues = append(hourlyValues, v)
+			// if v.date.Before(targetTime.Add(time.Hour * 1)) {
+			// 	fmt.Printf("DEBUGGER: list\ntarget time %vcsvTimeValue time: %vbefore time: %v\n\n", targetTime, v.date, targetTime.Add(time.Minute*10))
+			// }
+			if v.date.After(targetTime) && v.date.Before(targetTime.Add(time.Minute*12)) {
+				h := hValue{
+					time: targetTime.Add(time.Minute * 10),
+					// time:  targetTime,
+					value: v.value,
+				}
+				hourlyValues = append(hourlyValues, h)
+				// fmt.Printf("DEBUGGER: values per hour %v, time: %v\n", v.value, v.date)
 				// DEBUGGER
 				// fmt.Printf("target time: %v, hourly value: %v, timevalue: %v\n", targetTime, v, k)
 				break
 			}
+			if k == (len(*c) - 1) {
+				h := hValue{
+					time: targetTime.Add(time.Minute * 10),
+				}
+				hourlyValues = append(hourlyValues, h)
+			}
 		}
 	}
-	return hourlyValues, nil
+	// fmt.Printf("DEBUGGER: hourlyValues[0].value time	%v	%v\n", hourlyValues[0].value, hourlyValues[0].time)
+	return hourlyValues
 }
 
-func printValues (cfg hourlyCfg){
-	fmt.Printf("TITLE: %v\n", cfg.title)
-	for k, v := range cfg.values{
-		fmt.Printf("hour: %v = %v\n", k, v)
-	}
-	fmt.Printf("\n")
+type hValue struct {
+	time   time.Time
+	value  float64
+	dvalue float64
 }
+
+type hValues []hValue
+
+type excelParams struct {
+	name         string
+	hasTotal     bool
+	onlyTotal    bool
+	totalHParams totalHParams
+}
+type totalHParams struct {
+	firstReading     float64
+	lastReading      float64
+	firstReadingTime time.Time
+	lastReadingTime  time.Time
+	total            float64
+}
+
+func (h *hValues) calculateDValues() {
+	// fmt.Printf("DEBUGGER: lenght hvalues during calculateDValues: %v\n", len(*h))
+	for k, v := range *h {
+		if k == 0 || v.value == 0 || (*h)[k-1].value == 0 {
+			continue
+		}
+		// fmt.Printf("DEBUGGER:\nK: %v\nVbefore: %v\nVnow: %v", k, (*h)[k-1].value, v.value)
+		(*h)[k].dvalue = v.value - (*h)[k-1].value
+	}
+}
+
+func (h *hValues) printValues(printDiff bool) {
+	for _, v := range *h {
+		x := fmt.Sprintf("Time:%v|	value %.2f", v.time.Format("15:40"), v.value)
+		if printDiff {
+			x = x + fmt.Sprintf("	|	Difference: %.2f", v.dvalue)
+		}
+		fmt.Printf("%v\n", x)
+		// fmt.Printf("Time:%v|	value %.2f	|	Difference: %.2f\n", v.time, v.value, v.dvalue)
+	}
+}
+
+func (h *hValues) encodeExcel(e *excelize.File, p excelParams) {
+
+	setDefaultHeaders(e, p.name)
+
+	if p.hasTotal {
+		p.totalHParams.setExcelTotalValues(e, p.name)
+		if p.onlyTotal {
+			return
+		}
+	}
+
+	for k, v := range *h {
+		cellLoc := fmt.Sprintf("%c%d", 'A', k+2)
+		e.SetCellValue(p.name, cellLoc, v.time)
+	}
+
+	for k, v := range *h {
+		cellLoc := fmt.Sprintf("%c%d", 'B', k+2)
+		e.SetCellValue(p.name, cellLoc, v.value)
+	}
+
+	if (*h).hasDifference() {
+		for k, v := range *h {
+			e.SetCellValue(p.name, "C1", "Difference")
+			cellLoc := fmt.Sprintf("%c%d", 'C', k+2)
+			e.SetCellValue(p.name, cellLoc, v.dvalue)
+		}
+	}
+	e.SetCellValue(p.name, "A40", p.name)
+}
+
+func setDefaultHeaders(e *excelize.File, name string) {
+	e.SetColWidth(name, "A", "A", 20)
+
+	e.SetCellValue(name, "A1", "Time")
+	e.SetCellValue(name, "B1", "Value")
+}
+
+func (p *totalHParams) setExcelTotalValues(e *excelize.File, name string) {
+	e.SetColWidth(name, "E", "F", 18)
+	e.SetCellValue(name, "E1", "First Reading")
+	e.SetCellValue(name, "F1", p.firstReadingTime)
+	e.SetCellValue(name, "G1", p.firstReading)
+	e.SetCellValue(name, "E2", "Last Reading")
+	e.SetCellValue(name, "F2", p.lastReadingTime)
+	e.SetCellValue(name, "G2", p.lastReading)
+	// cellLoc := fmt.Sprintf("%c%d", 'E', 1)
+	e.SetCellValue(name, "E3", "TOTAL")
+	e.SetCellValue(name, "G3", p.total)
+}
+
+func (h *hValues) hasDifference() bool {
+	hasDifference := false
+	for _, v := range *h {
+		if v.dvalue != 0.00 {
+			hasDifference = true
+		}
+	}
+	return hasDifference
+}
+
+// func isFloat64(v interface{}) bool {
+// 	return reflect.TypeOf(v).Kind() == reflect.Float64
+// }
