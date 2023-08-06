@@ -180,9 +180,10 @@ func inputDateValues() time.Time {
 }
 
 type csvData struct {
-	trend string
-	date  time.Time
-	value float64
+	trend  string
+	object string
+	date   time.Time
+	value  float64
 }
 
 type csvDatas []csvData
@@ -246,7 +247,17 @@ func compileCsv(f *os.File, c *csvDatas) csvDatas {
 			fmt.Printf("err in reading csv row: %v", err)
 		}
 		var l csvData
-		l.trend = row[1]
+		fullObjName := strings.Split(row[0], " / ")
+		l.trend = fullObjName[2] + " | " + row[1]
+
+		//max sheet name characters is 22
+		if len(fullObjName[2]+" | "+row[1]) > 21 {
+			equipmentNameLen := len(fullObjName[2])
+			trendName := row[1]
+			remainder := 22 - equipmentNameLen
+			l.trend = trendName[len(trendName)-remainder:]
+		}
+
 		l.date, err = time.Parse("02/01/2006 15:04:05", row[2])
 		if err != nil {
 			fmt.Printf("error parsing date: %v", err)
